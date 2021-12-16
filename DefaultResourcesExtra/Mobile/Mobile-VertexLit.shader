@@ -7,104 +7,140 @@
 
 Shader "Mobile/VertexLit" {
 Properties {
-	_MainTex ("Base (RGB)", 2D) = "white" {}
+    _MainTex ("Base (RGB)", 2D) = "white" {}
 }
 
 SubShader {
-	Tags { "RenderType"="Opaque" }
-	LOD 80
-	
-	// Non-lightmapped
-	Pass {
-		Tags { "LightMode" = "Vertex" }
-		
-		Material {
-			Diffuse (1,1,1,1)
-			Ambient (1,1,1,1)
-		} 
-		Lighting On
-		SetTexture [_MainTex] {
-			constantColor (1,1,1,1)
-			Combine texture * primary DOUBLE, constant // UNITY_OPAQUE_ALPHA_FFP
-		} 
-	}
-	
-	// Lightmapped, encoded as dLDR
-	Pass {
-		Tags { "LightMode" = "VertexLM" }
-		
-		BindChannels {
-			Bind "Vertex", vertex
-			Bind "normal", normal
-			Bind "texcoord1", texcoord0 // lightmap uses 2nd uv
-			Bind "texcoord", texcoord1 // main uses 1st uv
-		}
-		
-		SetTexture [unity_Lightmap] {
-			matrix [unity_LightmapMatrix]
-			combine texture
-		}
-		SetTexture [_MainTex] {
-			constantColor (1,1,1,1)
-			combine texture * previous DOUBLE, constant // UNITY_OPAQUE_ALPHA_FFP
-		}
-	}
-	
-	// Lightmapped, encoded as RGBM
-	Pass {
-		Tags { "LightMode" = "VertexLMRGBM" }
-		
-		BindChannels {
-			Bind "Vertex", vertex
-			Bind "normal", normal
-			Bind "texcoord1", texcoord0 // lightmap uses 2nd uv
-			Bind "texcoord", texcoord1 // main uses 1st uv
-		}
-		
-		SetTexture [unity_Lightmap] {
-			matrix [unity_LightmapMatrix]
-			combine texture * texture alpha DOUBLE
-		}
-		SetTexture [_MainTex] {
-			constantColor (1,1,1,1)
-			combine texture * previous QUAD, constant // UNITY_OPAQUE_ALPHA_FFP
-		}
-	}	
-	
-	// Pass to render object as a shadow caster
-	Pass 
-	{
-		Name "ShadowCaster"
-		Tags { "LightMode" = "ShadowCaster" }
-		
-		ZWrite On ZTest LEqual Cull Off
+    Tags { "RenderType"="Opaque" }
+    LOD 80
 
-		CGPROGRAM
-		#pragma vertex vert
-		#pragma fragment frag
-		#pragma target 2.0
-		#pragma multi_compile_shadowcaster
-		#include "UnityCG.cginc"
+    // Non-lightmapped
+    Pass {
+        Tags { "LightMode" = "Vertex" }
 
-		struct v2f { 
-			V2F_SHADOW_CASTER;
-			UNITY_VERTEX_OUTPUT_STEREO
-		};
+        Material {
+            Diffuse (1,1,1,1)
+            Ambient (1,1,1,1)
+        }
+        Lighting On
+        SetTexture [_MainTex] {
+            constantColor (1,1,1,1)
+            Combine texture * primary DOUBLE, constant // UNITY_OPAQUE_ALPHA_FFP
+        }
+    }
 
-		v2f vert( appdata_base v )
-		{
-			v2f o;
-			UNITY_SETUP_INSTANCE_ID(v);
-			UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
-			TRANSFER_SHADOW_CASTER_NORMALOFFSET(o)
-			return o;
-		}
+    // Lightmapped
+    Pass
+    {
+        Tags{ "LIGHTMODE" = "VertexLM" "RenderType" = "Opaque" }
 
-		float4 frag( v2f i ) : SV_Target
-		{
-			SHADOW_CASTER_FRAGMENT(i)
-		}
-		ENDCG
-	}	
+        CGPROGRAM
+
+        #pragma vertex vert
+        #pragma fragment frag
+        #pragma target 2.0
+        #include "UnityCG.cginc"
+        #pragma multi_compile_fog
+        #define USING_FOG (defined(FOG_LINEAR) || defined(FOG_EXP) || defined(FOG_EXP2))
+
+        float4 _MainTex_ST;
+
+        struct appdata
+        {
+            float3 pos : POSITION;
+            float3 uv1 : TEXCOORD1;
+            float3 uv0 : TEXCOORD0;
+            UNITY_VERTEX_INPUT_INSTANCE_ID
+        };
+
+        struct v2f
+        {
+            float2 uv0 : TEXCOORD0;
+            float2 uv1 : TEXCOORD1;
+        #if USING_FOG
+            fixed fog : TEXCOORD2;
+        #endif
+            float4 pos : SV_POSITION;
+
+            UNITY_VERTEX_OUTPUT_STEREO
+        };
+
+        v2f vert(appdata IN)
+        {
+            v2f o;
+            UNITY_SETUP_INSTANCE_ID(IN);
+            UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
+
+            o.uv0 = IN.uv1.xy * unity_LightmapST.xy + unity_LightmapST.zw;
+            o.uv1 = IN.uv0.xy * _MainTex_ST.xy + _MainTex_ST.zw;
+
+        #if USING_FOG
+            float3 eyePos = UnityObjectToViewPos(IN.pos);
+            float fogCoord = length(eyePos.xyz);
+            UNITY_CALC_FOG_FACTOR_RAW(fogCoord);
+            o.fog = saturate(unityFogFactor);
+        #endif
+
+            o.pos = UnityObjectToClipPos(IN.pos);
+            return o;
+        }
+
+        sampler2D _MainTex;
+
+        fixed4 frag(v2f IN) : SV_Target
+        {
+            fixed4 col;
+            fixed4 tex = UNITY_SAMPLE_TEX2D(unity_Lightmap, IN.uv0.xy);
+            half3 bakedColor = DecodeLightmap(tex);
+
+            tex = tex2D(_MainTex, IN.uv1.xy);
+            col.rgb = tex.rgb * bakedColor;
+            col.a = 1.0f;
+
+            #if USING_FOG
+            col.rgb = lerp(unity_FogColor.rgb, col.rgb, IN.fog);
+            #endif
+
+            return col;
+        }
+
+        ENDCG
+    }
+
+    // Pass to render object as a shadow caster
+    Pass
+    {
+        Name "ShadowCaster"
+        Tags { "LightMode" = "ShadowCaster" }
+
+        ZWrite On ZTest LEqual Cull Off
+
+        CGPROGRAM
+        #pragma vertex vert
+        #pragma fragment frag
+        #pragma target 2.0
+        #pragma multi_compile_shadowcaster
+        #include "UnityCG.cginc"
+
+        struct v2f {
+            V2F_SHADOW_CASTER;
+            UNITY_VERTEX_OUTPUT_STEREO
+        };
+
+        v2f vert( appdata_base v )
+        {
+            v2f o;
+            UNITY_SETUP_INSTANCE_ID(v);
+            UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
+            TRANSFER_SHADOW_CASTER_NORMALOFFSET(o)
+            return o;
+        }
+
+        float4 frag( v2f i ) : SV_Target
+        {
+            SHADOW_CASTER_FRAGMENT(i)
+        }
+        ENDCG
+    }
 }
 }
